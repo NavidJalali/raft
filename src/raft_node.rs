@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
 
 use tokio::{
     sync::{
@@ -18,11 +18,14 @@ use crate::{
     node_id::NodeId,
     node_role::NodeRole,
     node_state::NodeState,
+    persistence::{Checkpoint, Persistence},
+    state,
     term::Term,
 };
 
-pub struct RaftNode<A: Clone + Eq + Send + Sync, C: Cluster<A>> {
+pub struct RaftNode<A: Clone + Eq + Send + Sync, C: Cluster<A>, Storage: Persistence<A>> {
     cluster: C,
+    storage: Storage,
     config: Config,
     state: NodeState<A>,
     mailbox: UnboundedReceiver<Message<A>>,
@@ -37,21 +40,35 @@ pub struct RaftNode<A: Clone + Eq + Send + Sync, C: Cluster<A>> {
 impl<
         A: std::fmt::Debug + Clone + Eq + Send + Sync + 'static,
         C: Cluster<A> + Send + Sync + 'static,
-    > RaftNode<A, C>
+        Storage: Persistence<A> + Send + Sync + 'static,
+    > RaftNode<A, C, Storage>
 {
-    pub async fn make_fresh(
+    pub async fn make(
         node_id: NodeId,
         config: Config,
         cluster: C,
+        storage: Storage,
         message_delivery_queue: UnboundedSender<A>,
     ) -> LocalNodeRef<A> {
         let (sender, receiver) = unbounded_channel();
         let election_fiber = Self::election_timer(&config, sender.clone());
 
+        let state = match storage.load().await.unwrap() {
+            Some(checkpoint) => NodeState::recover(
+                checkpoint.node_id,
+                checkpoint.current_term,
+                checkpoint.voted_for,
+                checkpoint.log,
+                checkpoint.commit_length,
+            ),
+            None => NodeState::initialize(node_id),
+        };
+
         let node = Self {
             config,
-            state: NodeState::initialize(node_id),
+            state,
             cluster,
+            storage,
             mailbox: receiver,
             self_ref: sender.clone(),
             timer: election_fiber,
@@ -62,6 +79,18 @@ impl<
         tokio::spawn(node.start());
 
         LocalNodeRef::new(node_id, sender)
+    }
+
+    async fn checkpoint(&self) {
+        let checkpoint = Checkpoint {
+            node_id: self.state.node_id,
+            current_term: self.state.current_term,
+            voted_for: self.state.voted_for,
+            log: self.state.log.clone(),
+            commit_length: self.state.commit_length,
+        };
+
+        self.storage.save(checkpoint).await.unwrap();
     }
 
     fn reset_on_commit_promises(&mut self) {
@@ -144,7 +173,7 @@ impl<
             .await;
     }
 
-    fn append_entries(
+    async fn append_entries(
         &mut self,
         prefix_length: usize,
         leader_commit_length: u64,
@@ -176,6 +205,7 @@ impl<
             }
             self.state.commit_length = leader_commit_length;
         }
+        self.checkpoint().await;
     }
 
     fn deliver_log_entry(&mut self, index: usize) {
@@ -204,6 +234,7 @@ impl<
                 break;
             }
         }
+        self.checkpoint().await;
     }
 
     async fn process_message(&mut self, message: Message<A>) {
@@ -224,6 +255,7 @@ impl<
                     self.state.voted_for = None;
                     self.reset_on_commit_promises();
                     self.reset_election_timer();
+                    self.checkpoint().await;
                 }
 
                 let last_term = self.state.log.last().map(|m| m.term).unwrap_or(Term(0));
@@ -241,6 +273,7 @@ impl<
 
                 if vote_granted {
                     self.state.voted_for = Some(candidate_node_id);
+                    self.checkpoint().await;
                 }
 
                 self.cluster
@@ -277,6 +310,8 @@ impl<
                             self.state.node_id, self.state.current_term
                         );
 
+                        self.checkpoint().await;
+
                         for follower in self.cluster.nodes().await {
                             if follower != self.state.node_id {
                                 self.state
@@ -294,6 +329,7 @@ impl<
                     self.state.voted_for = None;
                     self.reset_on_commit_promises();
                     self.reset_election_timer();
+                    self.checkpoint().await;
                 }
             }
             Message::NodeToNode(NodeToNodeMessage::AppendEntriesRequest {
@@ -315,6 +351,7 @@ impl<
                     self.state.current_leader = Some(node_id);
                     self.reset_on_commit_promises();
                     self.reset_election_timer();
+                    self.checkpoint().await;
                 }
 
                 // We should check if that we have the prefix the leader assumed we do. I.e there are no gaps in the log.
@@ -331,8 +368,10 @@ impl<
 
                 if self.state.current_term == current_term && log_ok {
                     let suffix_length = suffix.len() as u64;
-                    self.append_entries(prefix_length as usize, leader_commit_length, suffix);
+                    self.append_entries(prefix_length as usize, leader_commit_length, suffix)
+                        .await;
                     let acked_length = prefix_length + suffix_length;
+                    self.checkpoint().await;
                     let accept = NodeToNodeMessage::AppendEntriesResponse {
                         node_id: self.state.node_id,
                         current_term: self.state.current_term,
@@ -375,6 +414,7 @@ impl<
                     self.state.voted_for = None;
                     self.reset_on_commit_promises();
                     self.reset_election_timer();
+                    self.checkpoint().await;
                 }
             }
             // Client
@@ -405,6 +445,8 @@ impl<
                         .sent_length
                         .insert(self.state.node_id, self.state.log.len() as u64);
 
+                    self.checkpoint().await;
+
                     // replicate to followers
                     for follower in self.cluster.nodes().await {
                         if follower != self.state.node_id {
@@ -422,6 +464,8 @@ impl<
                 self.state.voted_for = Some(self.state.node_id);
                 self.state.votes_received.insert(self.state.node_id);
                 let last_term = self.state.log.last().map(|m| m.term).unwrap_or(Term(0));
+
+                self.checkpoint().await;
 
                 for node in self.cluster.nodes().await {
                     if node != self.state.node_id {

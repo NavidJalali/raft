@@ -14,6 +14,7 @@ mod message;
 mod node_id;
 mod node_role;
 mod node_state;
+mod persistence;
 mod raft_node;
 mod remote_node_ref;
 mod routes;
@@ -76,10 +77,13 @@ async fn main() {
 
     let kv_app_sender = kv_app.sender.clone();
 
-    let local_node_ref = RaftNode::make_fresh(
+    let storage = persistence::FileOnDiskPersistence::new(node_id);
+
+    let local_node_ref = RaftNode::make(
         node_id,
         config.clone(),
         static_cluster.clone(),
+        storage,
         kv_app_sender,
     )
     .await;
