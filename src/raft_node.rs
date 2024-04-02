@@ -19,7 +19,6 @@ use crate::{
     node_role::NodeRole,
     node_state::NodeState,
     persistence::{Checkpoint, Persistence},
-    state,
     term::Term,
 };
 
@@ -454,7 +453,18 @@ impl<
                         }
                     }
                 } else {
-                    let _ = on_commit.send(Outcome::Failure("Not the leader".to_string()));
+                    match self.state.current_leader {
+                        Some(leader) => {
+                            let current_term = self.state.current_term;
+                            let _ = on_commit.send(Outcome::Failure(format!(
+                                "Not the leader. Current leader is {:?} in term {:?}",
+                                leader, current_term
+                            )));
+                        }
+                        None => {
+                            let _ = on_commit.send(Outcome::Failure("Not the leader".to_string()));
+                        }
+                    }
                 }
             }
             // Internal
