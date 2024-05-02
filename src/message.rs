@@ -42,6 +42,7 @@ pub enum NodeToSelfMessage {
 #[derive(Debug)]
 pub enum Outcome {
     Success,
+    Redirect(NodeId),
     Failure(String),
 }
 

@@ -1,4 +1,5 @@
 use crate::{
+    cluster::Cluster,
     key_value_command::KeyValueCommand,
     kv_app::Store,
     message::{LocalClientToNodeMessage, Message, NodeToNodeMessage, Outcome},
@@ -6,7 +7,7 @@ use crate::{
 };
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, HeaderValue, StatusCode},
     routing::{delete, get, post},
     Json, Router,
 };
@@ -48,7 +49,7 @@ async fn post_handler<S: AppState<KeyValueCommand>>(
     state: State<S>,
     Path(key): Path<String>,
     Json(value): Json<String>,
-) -> String {
+) -> (StatusCode, HeaderMap, String) {
     let node_ref = state.local_node();
     // make oneshot
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -61,16 +62,39 @@ async fn post_handler<S: AppState<KeyValueCommand>>(
 
     // wait for response
     match rx.await {
-        Ok(Outcome::Success) => "OK".to_string(),
-        Ok(Outcome::Failure(reason)) => format!("Error: {}", reason),
-        Err(_) => "Error: Channel closed".to_string(),
+        Ok(Outcome::Success) => (StatusCode::OK, HeaderMap::new(), "OK".to_string()),
+        Ok(Outcome::Failure(reason)) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, HeaderMap::new(), reason)
+        }
+        Ok(Outcome::Redirect(leader_id)) => match state.cluster().node_ref(leader_id).await {
+            None => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                HeaderMap::new(),
+                "Leader not found".to_string(),
+            ),
+            Some(leader_ref) => {
+                let url = format!("{}/store/{}", leader_ref.base_url(), key);
+                let mut headers = HeaderMap::new();
+                headers.append("Location", HeaderValue::from_str(&url).unwrap());
+                (
+                    StatusCode::TEMPORARY_REDIRECT,
+                    headers,
+                    "Redirecting".to_string(),
+                )
+            }
+        },
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            HeaderMap::new(),
+            "Failed to send message".to_string(),
+        ),
     }
 }
 
 async fn delete_handler<S: AppState<KeyValueCommand>>(
     state: State<S>,
     Path(key): Path<String>,
-) -> (StatusCode, String) {
+) -> (StatusCode, HeaderMap, String) {
     let node_ref = state.local_node();
     // make oneshot
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -83,11 +107,31 @@ async fn delete_handler<S: AppState<KeyValueCommand>>(
 
     // wait for response
     match rx.await {
-        Ok(Outcome::Success) => (StatusCode::OK, "OK".to_string()),
-        Ok(Outcome::Failure(reason)) => (StatusCode::INTERNAL_SERVER_ERROR, reason),
+        Ok(Outcome::Success) => (StatusCode::OK, HeaderMap::new(), "OK".to_string()),
+        Ok(Outcome::Failure(reason)) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, HeaderMap::new(), reason)
+        }
+        Ok(Outcome::Redirect(leader_id)) => match state.cluster().node_ref(leader_id).await {
+            None => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                HeaderMap::new(),
+                "Leader not found".to_string(),
+            ),
+            Some(leader_ref) => {
+                let url = format!("{}/store/{}", leader_ref.base_url(), key);
+                let mut headers = HeaderMap::new();
+                headers.append("Location", HeaderValue::from_str(&url).unwrap());
+                (
+                    StatusCode::TEMPORARY_REDIRECT,
+                    headers,
+                    "Redirecting".to_string(),
+                )
+            }
+        },
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            "Channel closed".to_string(),
+            HeaderMap::new(),
+            "Failed to send message".to_string(),
         ),
     }
 }

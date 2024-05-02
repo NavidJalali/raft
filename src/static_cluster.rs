@@ -69,4 +69,10 @@ impl<A: Clone + Eq + Send + Sync> Cluster<A> for StaticCluster<A> {
     async fn majority(&self) -> usize {
         self.nodes.len() / 2 + 1
     }
+
+    async fn node_ref(&self, node_id: NodeId) -> Option<RemoteNodeRef> {
+        self.nodes
+            .get(&node_id)
+            .map(|(node_ref, _)| node_ref.clone())
+    }
 }

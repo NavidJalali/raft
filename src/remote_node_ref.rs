@@ -12,7 +12,11 @@ impl RemoteNodeRef {
         Self { id, host, port }
     }
 
+    pub fn base_url(&self) -> String {
+        format!("http://{}:{}", self.host, self.port)
+    }
+
     pub fn url(&self) -> String {
-        format!("http://{}:{}/raft", self.host, self.port)
+        format!("{}/raft", self.base_url())
     }
 }

@@ -7,7 +7,6 @@ mod cluster;
 mod config;
 mod key_value_command;
 mod kv_app;
-mod local_cluster;
 mod local_node_ref;
 mod log_entry;
 mod message;

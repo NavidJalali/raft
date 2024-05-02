@@ -53,14 +53,24 @@ impl<
         let election_fiber = Self::election_timer(&config, sender.clone());
 
         let state = match storage.load().await.unwrap() {
-            Some(checkpoint) => NodeState::recover(
-                checkpoint.node_id,
-                checkpoint.current_term,
-                checkpoint.voted_for,
-                checkpoint.log,
-                checkpoint.commit_length,
-            ),
-            None => NodeState::initialize(node_id),
+            Some(checkpoint) => {
+                info!("Loaded state from storage: {:?}", checkpoint);
+                for log_entry in checkpoint.log.iter() {
+                    info!("Replaying log entry: {:?}", log_entry);
+                    message_delivery_queue.send(log_entry.data.clone()).unwrap()
+                }
+                NodeState::recover(
+                    checkpoint.node_id,
+                    checkpoint.current_term,
+                    checkpoint.voted_for,
+                    checkpoint.log,
+                    checkpoint.commit_length,
+                )
+            }
+            None => {
+                info!("No state found in storage");
+                NodeState::initialize(node_id)
+            }
         };
 
         let node = Self {
@@ -456,10 +466,11 @@ impl<
                     match self.state.current_leader {
                         Some(leader) => {
                             let current_term = self.state.current_term;
-                            let _ = on_commit.send(Outcome::Failure(format!(
+                            info!(
                                 "Not the leader. Current leader is {:?} in term {:?}",
                                 leader, current_term
-                            )));
+                            );
+                            let _ = on_commit.send(Outcome::Redirect(leader));
                         }
                         None => {
                             let _ = on_commit.send(Outcome::Failure("Not the leader".to_string()));
