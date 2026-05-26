@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use axum::async_trait;
+use async_trait::async_trait;
 use serde::Serialize;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::error;

@@ -1,4 +1,4 @@
-use rand::Rng;
+use rand::RngExt;
 
 #[derive(Debug, Copy, Clone)]
 pub struct TimeWindow {
@@ -14,8 +14,8 @@ impl TimeWindow {
         }
     }
     pub fn choose(&self) -> std::time::Duration {
-        let mut rnd = rand::thread_rng();
+        let mut rnd = rand::rng();
         let range = self.min_duration..=self.max_duration;
-        rnd.gen_range(range)
+        rnd.random_range(range)
     }
 }

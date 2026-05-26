@@ -4,6 +4,7 @@ use crate::{message::Message, node_id::NodeId};
 
 #[derive(Clone, Debug)]
 pub struct LocalNodeRef<A: Clone + Eq> {
+    #[allow(unused)]
     pub id: NodeId,
     mailbox: UnboundedSender<Message<A>>,
 }
