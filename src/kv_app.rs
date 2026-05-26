@@ -35,10 +35,7 @@ impl KVApp {
                 }
             }
         });
-        Self {
-            store: store,
-            sender: tx,
-        }
+        Self { store, sender: tx }
     }
 }
 

@@ -80,7 +80,7 @@ async fn main() {
 
     let local_node_ref = RaftNode::make(
         node_id,
-        config.clone(),
+        config,
         static_cluster.clone(),
         storage,
         kv_app_sender,
