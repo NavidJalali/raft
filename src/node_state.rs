@@ -11,14 +11,14 @@ pub struct NodeState<A: Clone + Eq> {
   pub current_term: Term,
   pub voted_for: Option<NodeId>,
   pub log: Vec<LogEntry<A>>,
-  pub commit_length: u64,
+  pub commit_length: usize,
 
   // Transient. Resets on recovery.
   pub current_role: NodeRole,
   pub current_leader: Option<NodeId>,
   pub votes_received: HashSet<NodeId>,
-  pub sent_length: HashMap<NodeId, u64>,
-  pub acked_length: HashMap<NodeId, u64>,
+  pub sent_length: HashMap<NodeId, usize>,
+  pub acked_length: HashMap<NodeId, usize>,
 }
 
 impl<A: Clone + Eq> NodeState<A> {
@@ -28,7 +28,7 @@ impl<A: Clone + Eq> NodeState<A> {
     current_term: Term,
     voted_for: Option<NodeId>,
     log: Vec<LogEntry<A>>,
-    commit_length: u64,
+    commit_length: usize,
   ) -> Self {
     Self {
       node_id,
