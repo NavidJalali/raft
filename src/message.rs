@@ -9,7 +9,7 @@ pub enum NodeToNodeMessage<Data: Clone + Eq> {
   VoteRequest {
     candidate_node_id: NodeId,
     candidate_current_term: Term,
-    candidate_log_length: u64,
+    candidate_log_length: usize,
     candidate_last_log_term: Term,
   },
   VoteResponse {
@@ -20,15 +20,15 @@ pub enum NodeToNodeMessage<Data: Clone + Eq> {
   AppendEntriesRequest {
     node_id: NodeId,
     current_term: Term,
-    prefix_length: u64,
+    prefix_length: usize,
     prefix_term: Term,
-    leader_commit_length: u64,
+    leader_commit_length: usize,
     suffix: Vec<LogEntry<Data>>,
   },
   AppendEntriesResponse {
     node_id: NodeId,
     current_term: Term,
-    acked_length: u64,
+    acked_length: usize,
     success: bool,
   },
 }

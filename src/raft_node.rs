@@ -62,8 +62,7 @@ impl<
     let state = match storage.load().await.unwrap() {
       Some(checkpoint) => {
         info!("Loaded state from storage: {:?}", checkpoint);
-        let committed =
-          (checkpoint.commit_length as usize).min(checkpoint.log.len());
+        let committed = checkpoint.commit_length.min(checkpoint.log.len());
         for log_entry in checkpoint.log[0..committed].iter() {
           info!("Replaying log entry: {:?}", log_entry);
           message_delivery_queue.send(log_entry.data.clone()).unwrap()
@@ -168,8 +167,7 @@ impl<
   }
 
   async fn replicate_log(&self, follower: NodeId) {
-    let prefix_length =
-      *self.state.sent_length.get(&follower).unwrap() as usize;
+    let prefix_length = *self.state.sent_length.get(&follower).unwrap();
     let suffix = self.state.log[prefix_length..].to_vec();
     let prefix_term = if prefix_length > 0 {
       self.state.log[prefix_length - 1].term
@@ -184,7 +182,7 @@ impl<
         NodeToNodeMessage::AppendEntriesRequest {
           node_id: self.state.node_id,
           current_term: self.state.current_term,
-          prefix_length: prefix_length as u64,
+          prefix_length,
           prefix_term,
           leader_commit_length: self.state.commit_length,
           suffix,
@@ -196,7 +194,7 @@ impl<
   async fn append_entries(
     &mut self,
     prefix_length: usize,
-    leader_commit_length: u64,
+    leader_commit_length: usize,
     suffix: Vec<LogEntry<A>>,
   ) {
     // First, if we already have some of the logs, we should check if they are the same.
@@ -218,7 +216,7 @@ impl<
     // Update the commit length
     if leader_commit_length > self.state.commit_length {
       for i in self.state.commit_length..leader_commit_length {
-        self.deliver_log_entry(i as usize);
+        self.deliver_log_entry(i);
       }
       self.state.commit_length = leader_commit_length;
     }
@@ -235,7 +233,7 @@ impl<
   }
 
   async fn commit_log_entries(&mut self) {
-    while self.state.commit_length < self.state.log.len() as u64 {
+    while self.state.commit_length < self.state.log.len() {
       let acks = self.cluster.nodes().await.iter().fold(0, |acc, node| {
         if *self.state.acked_length.get(node).unwrap()
           >= self.state.commit_length
@@ -247,7 +245,7 @@ impl<
       });
 
       if acks >= self.cluster.majority().await {
-        self.deliver_log_entry(self.state.commit_length as usize);
+        self.deliver_log_entry(self.state.commit_length);
         self.state.commit_length += 1;
       } else {
         break;
@@ -282,7 +280,7 @@ impl<
 
         let log_ok = (candidate_last_log_term >= last_term)
           || (candidate_last_log_term == last_term
-            && candidate_log_length >= self.state.log.len() as u64);
+            && candidate_log_length >= self.state.log.len());
 
         let voted_ok = self.state.voted_for.is_none()
           || self.state.voted_for == Some(candidate_node_id);
@@ -338,7 +336,7 @@ impl<
                 self
                   .state
                   .sent_length
-                  .insert(follower, self.state.log.len() as u64);
+                  .insert(follower, self.state.log.len());
 
                 self.state.acked_length.insert(follower, 0);
                 self.replicate_log(follower).await;
@@ -378,24 +376,20 @@ impl<
 
         // We should check if that we have the prefix the leader assumed we do. I.e there are no gaps in the log.
         let log_length_is_at_least_prefix_length =
-          self.state.log.len() as u64 >= prefix_length;
+          self.state.log.len() >= prefix_length;
 
         // Raft guarantees that if the prefix term is the same, the log is the same up to the prefix.
         // Basically this is an efficient way to check if the logs are the same up to the prefix.
         let prefix_term_ok = (prefix_length == 0)
           || (prefix_length > 0
-            && self.state.log[prefix_length as usize - 1].term == prefix_term);
+            && self.state.log[prefix_length - 1].term == prefix_term);
 
         let log_ok = log_length_is_at_least_prefix_length && prefix_term_ok;
 
         if self.state.current_term == current_term && log_ok {
-          let suffix_length = suffix.len() as u64;
+          let suffix_length = suffix.len();
           self
-            .append_entries(
-              prefix_length as usize,
-              leader_commit_length,
-              suffix,
-            )
+            .append_entries(prefix_length, leader_commit_length, suffix)
             .await;
           let acked_length = prefix_length + suffix_length;
           self.checkpoint().await;
@@ -470,12 +464,12 @@ impl<
           self
             .state
             .acked_length
-            .insert(self.state.node_id, self.state.log.len() as u64);
+            .insert(self.state.node_id, self.state.log.len());
 
           self
             .state
             .sent_length
-            .insert(self.state.node_id, self.state.log.len() as u64);
+            .insert(self.state.node_id, self.state.log.len());
 
           self.checkpoint().await;
 
@@ -522,7 +516,7 @@ impl<
                 NodeToNodeMessage::VoteRequest {
                   candidate_node_id: self.state.node_id,
                   candidate_current_term: self.state.current_term,
-                  candidate_log_length: self.state.log.len() as u64,
+                  candidate_log_length: self.state.log.len(),
                   candidate_last_log_term: last_term,
                 },
               )

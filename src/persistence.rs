@@ -8,7 +8,7 @@ pub struct Checkpoint<A: Clone + Eq> {
   pub current_term: Term,
   pub voted_for: Option<NodeId>,
   pub log: Vec<LogEntry<A>>,
-  pub commit_length: u64,
+  pub commit_length: usize,
 }
 
 #[async_trait]
