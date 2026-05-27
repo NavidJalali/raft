@@ -4,19 +4,19 @@ use serde::{Deserialize, Serialize};
 pub struct Term(pub u64);
 
 impl Term {
-    pub fn increment(self) -> Self {
-        Term(self.0 + 1)
-    }
+  pub fn increment(self) -> Self {
+    Term(self.0 + 1)
+  }
 }
 
 impl PartialOrd for Term {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
+  fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    Some(self.cmp(other))
+  }
 }
 
 impl Ord for Term {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0.cmp(&other.0)
-    }
+  fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    self.0.cmp(&other.0)
+  }
 }
