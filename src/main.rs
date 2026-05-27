@@ -31,7 +31,8 @@ async fn main() {
     .with_max_level(tracing::Level::INFO)
     .finish();
 
-  tracing::subscriber::set_global_default(subscriber).unwrap();
+  tracing::subscriber::set_global_default(subscriber)
+    .expect("Failed to set tracing subscriber");
 
   let config = Config {
     election_time_window: TimeWindow::new(
@@ -104,13 +105,21 @@ async fn main() {
 
   let router = routes::make_router(state.clone());
 
-  let self_remote_ref = state.cluster.nodes.get(&node_id).unwrap().0.clone();
+  let self_remote_ref = state
+    .cluster
+    .nodes
+    .get(&node_id)
+    .expect("Node not found in cluster")
+    .0
+    .clone();
   let host = self_remote_ref.host.clone();
   let port = self_remote_ref.port;
   let url = format!("{}:{}", host, port);
 
-  let listener = TcpListener::bind(url).await.unwrap();
+  let listener = TcpListener::bind(url)
+    .await
+    .expect("Failed to bind TCP listener");
   axum::serve(listener, router.into_make_service())
     .await
-    .unwrap();
+    .expect("Failed to start HTTP server");
 }

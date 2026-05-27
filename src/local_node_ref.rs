@@ -14,6 +14,9 @@ impl<A: Clone + Eq> LocalNodeRef<A> {
     Self { id, mailbox }
   }
   pub fn offer(&self, message: Message<A>) {
-    self.mailbox.send(message).unwrap()
+    self
+      .mailbox
+      .send(message)
+      .expect("Failed to send message to node mailbox")
   }
 }

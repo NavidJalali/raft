@@ -36,15 +36,20 @@ impl<A: Clone + Eq + Serialize + Send + Sync + 'static + DeserializeOwned>
   Persistence<A> for FileOnDiskPersistence
 {
   async fn save(&self, checkpoint: Checkpoint<A>) -> Result<(), String> {
-    tokio::fs::write(self.path(), serde_json::to_string(&checkpoint).unwrap())
-      .await
-      .map_err(|e| e.to_string())
+    tokio::fs::write(
+      self.path(),
+      serde_json::to_string(&checkpoint)
+        .expect("Failed to serialize checkpoint to JSON"),
+    )
+    .await
+    .map_err(|e| e.to_string())
   }
 
   async fn load(&self) -> Result<Option<Checkpoint<A>>, String> {
     match tokio::fs::read(self.path()).await {
       Ok(bytes) => {
-        let checkpoint: Checkpoint<A> = serde_json::from_slice(&bytes).unwrap();
+        let checkpoint: Checkpoint<A> = serde_json::from_slice(&bytes)
+          .expect("Failed to deserialize checkpoint from storage");
         Ok(Some(checkpoint))
       }
       Err(e) => {
@@ -78,12 +83,21 @@ pub(crate) mod in_memory {
   #[async_trait]
   impl<A: Clone + Eq + Send + Sync> Persistence<A> for InMemoryPersistence<A> {
     async fn save(&self, checkpoint: Checkpoint<A>) -> Result<(), String> {
-      *self.checkpoint.lock().unwrap() = Some(checkpoint);
+      *self
+        .checkpoint
+        .lock()
+        .expect("Failed to lock checkpoint mutex for write") = Some(checkpoint);
       Ok(())
     }
 
     async fn load(&self) -> Result<Option<Checkpoint<A>>, String> {
-      Ok(self.checkpoint.lock().unwrap().clone())
+      Ok(
+        self
+          .checkpoint
+          .lock()
+          .expect("Failed to lock checkpoint mutex for read")
+          .clone(),
+      )
     }
   }
 }

@@ -48,7 +48,7 @@ impl<A: Clone + Eq> NodeState<A> {
   pub fn initialize(node_id: NodeId) -> Self {
     Self {
       node_id,
-      current_term: Term(0),
+      current_term: Term::zero(),
       voted_for: None,
       log: Vec::new(),
       commit_length: 0,

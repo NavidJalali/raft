@@ -56,7 +56,8 @@ impl<A: Clone + Eq + Send + Sync> Cluster<A> for StaticCluster<A> {
   async fn send_message(&self, node_id: NodeId, message: NodeToNodeMessage<A>) {
     match self.nodes.get(&node_id) {
       Some((_, tx)) => {
-        tx.send(message).unwrap();
+        tx.send(message)
+          .expect("Failed to send message to node channel");
       }
       None => {
         error!("Node {:?} not found", node_id);

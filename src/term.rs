@@ -7,6 +7,10 @@ impl Term {
   pub fn increment(self) -> Self {
     Term(self.0 + 1)
   }
+
+  pub fn zero() -> Self {
+    Term(0)
+  }
 }
 
 impl PartialOrd for Term {
