@@ -42,7 +42,7 @@ impl<A: Clone + Eq + Serialize + Send + Sync + 'static> StaticCluster<A> {
                         }
                     }
                 });
-                (node_id.clone(), (remote_ref.clone(), tx))
+                (node_id, (remote_ref.clone(), tx))
             })
             .collect();
         Self { nodes }

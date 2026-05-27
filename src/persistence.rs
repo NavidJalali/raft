@@ -1,8 +1,8 @@
 use crate::{log_entry::LogEntry, node_id::NodeId, term::Term};
 use async_trait::async_trait;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Checkpoint<A: Clone + Eq> {
     pub node_id: NodeId,
     pub current_term: Term,
@@ -54,6 +54,36 @@ impl<A: Clone + Eq + Serialize + Send + Sync + 'static + DeserializeOwned> Persi
                     Err(e.to_string())
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod in_memory {
+    use super::*;
+    use std::sync::Mutex;
+
+    pub struct InMemoryPersistence<A: Clone + Eq> {
+        checkpoint: Mutex<Option<Checkpoint<A>>>,
+    }
+
+    impl<A: Clone + Eq> InMemoryPersistence<A> {
+        pub fn with(checkpoint: Checkpoint<A>) -> Self {
+            Self {
+                checkpoint: Mutex::new(Some(checkpoint)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl<A: Clone + Eq + Send + Sync> Persistence<A> for InMemoryPersistence<A> {
+        async fn save(&self, checkpoint: Checkpoint<A>) -> Result<(), String> {
+            *self.checkpoint.lock().unwrap() = Some(checkpoint);
+            Ok(())
+        }
+
+        async fn load(&self) -> Result<Option<Checkpoint<A>>, String> {
+            Ok(self.checkpoint.lock().unwrap().clone())
         }
     }
 }

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use tokio::{
     sync::{
-        mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
+        mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
         oneshot,
     },
     task::JoinHandle,
@@ -37,10 +37,10 @@ pub struct RaftNode<A: Clone + Eq + Send + Sync, C: Cluster<A>, Storage: Persist
 }
 
 impl<
-        A: std::fmt::Debug + Clone + Eq + Send + Sync + 'static,
-        C: Cluster<A> + Send + Sync + 'static,
-        Storage: Persistence<A> + Send + Sync + 'static,
-    > RaftNode<A, C, Storage>
+    A: std::fmt::Debug + Clone + Eq + Send + Sync + 'static,
+    C: Cluster<A> + Send + Sync + 'static,
+    Storage: Persistence<A> + Send + Sync + 'static,
+> RaftNode<A, C, Storage>
 {
     pub async fn make(
         node_id: NodeId,
@@ -55,7 +55,8 @@ impl<
         let state = match storage.load().await.unwrap() {
             Some(checkpoint) => {
                 info!("Loaded state from storage: {:?}", checkpoint);
-                for log_entry in checkpoint.log.iter() {
+                let committed = (checkpoint.commit_length as usize).min(checkpoint.log.len());
+                for log_entry in checkpoint.log[0..committed].iter() {
                     info!("Replaying log entry: {:?}", log_entry);
                     message_delivery_queue.send(log_entry.data.clone()).unwrap()
                 }
@@ -157,10 +158,7 @@ impl<
 
     async fn replicate_log(&self, follower: NodeId) {
         let prefix_length = *self.state.sent_length.get(&follower).unwrap() as usize;
-        let suffix = self.state.log[prefix_length..]
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>();
+        let suffix = self.state.log[prefix_length..].to_vec();
         let prefix_term = if prefix_length > 0 {
             self.state.log[prefix_length - 1].term
         } else {
@@ -189,12 +187,8 @@ impl<
         suffix: Vec<LogEntry<A>>,
     ) {
         // First, if we already have some of the logs, we should check if they are the same.
-        if suffix.len() > 0 && self.state.log.len() > prefix_length {
-            let index = self
-                .state
-                .log
-                .len()
-                .min(prefix_length as usize + suffix.len() - 1);
+        if !suffix.is_empty() && self.state.log.len() > prefix_length {
+            let index = (self.state.log.len() - 1).min(prefix_length + suffix.len() - 1);
 
             if self.state.log[index].term != suffix[index - prefix_length].term {
                 // We should truncate the log to be the same as the prefix length.
@@ -515,5 +509,66 @@ impl<
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        cluster::stub::StubCluster, persistence::in_memory::InMemoryPersistence,
+        time_window::TimeWindow,
+    };
+    use std::time::Duration;
+
+    fn entry(term: u64, data: &str) -> LogEntry<String> {
+        LogEntry {
+            data: data.to_string(),
+            term: Term(term),
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_only_replays_committed_log_entries() {
+        // Log has 4 entries, but only the first 2 are committed. The bug
+        // replayed all 4 — only "a" and "b" should be delivered.
+        let checkpoint = Checkpoint {
+            node_id: NodeId(1),
+            current_term: Term(2),
+            voted_for: None,
+            log: vec![entry(1, "a"), entry(1, "b"), entry(2, "c"), entry(2, "d")],
+            commit_length: 2,
+        };
+
+        // Long timer windows so neither election nor heartbeat fires during the test.
+        let config = Config {
+            election_time_window: TimeWindow::new(Duration::from_secs(60), Duration::from_secs(60)),
+            heartbeat_time_window: TimeWindow::new(
+                Duration::from_secs(60),
+                Duration::from_secs(60),
+            ),
+        };
+
+        let (delivery_tx, mut delivery_rx) = unbounded_channel::<String>();
+
+        let _node_ref = RaftNode::make(
+            NodeId(1),
+            config,
+            StubCluster,
+            InMemoryPersistence::with(checkpoint),
+            delivery_tx,
+        )
+        .await;
+
+        let mut delivered = Vec::new();
+        loop {
+            match tokio::time::timeout(Duration::from_millis(50), delivery_rx.recv()).await {
+                Ok(Some(v)) => delivered.push(v),
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+
+        assert_eq!(delivered, vec!["a".to_string(), "b".to_string()]);
     }
 }
