@@ -78,7 +78,10 @@ async fn post_handler<S: AppState<KeyValueCommand>>(
         Some(leader_ref) => {
           let url = format!("{}/store/{}", leader_ref.base_url(), key);
           let mut headers = HeaderMap::new();
-          headers.append("Location", HeaderValue::from_str(&url).unwrap());
+          headers.append(
+            "Location",
+            HeaderValue::from_str(&url).expect("Failed to parse redirect URL"),
+          );
           (
             StatusCode::TEMPORARY_REDIRECT,
             headers,
@@ -127,7 +130,10 @@ async fn delete_handler<S: AppState<KeyValueCommand>>(
         Some(leader_ref) => {
           let url = format!("{}/store/{}", leader_ref.base_url(), key);
           let mut headers = HeaderMap::new();
-          headers.append("Location", HeaderValue::from_str(&url).unwrap());
+          headers.append(
+            "Location",
+            HeaderValue::from_str(&url).expect("Failed to parse redirect URL"),
+          );
           (
             StatusCode::TEMPORARY_REDIRECT,
             headers,

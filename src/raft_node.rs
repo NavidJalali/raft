@@ -59,13 +59,19 @@ impl<
     let (sender, receiver) = unbounded_channel();
     let election_fiber = Self::election_timer(&config, sender.clone());
 
-    let state = match storage.load().await.unwrap() {
+    let state = match storage
+      .load()
+      .await
+      .expect("Failed to load state from storage")
+    {
       Some(checkpoint) => {
         info!("Loaded state from storage: {:?}", checkpoint);
         let committed = checkpoint.commit_length.min(checkpoint.log.len());
         for log_entry in checkpoint.log[0..committed].iter() {
           info!("Replaying log entry: {:?}", log_entry);
-          message_delivery_queue.send(log_entry.data.clone()).unwrap()
+          message_delivery_queue.send(log_entry.data.clone()).expect(
+            "Failed to send log entry to delivery queue during recovery",
+          )
         }
         NodeState::recover(
           checkpoint.node_id,
@@ -107,7 +113,11 @@ impl<
       commit_length: self.state.commit_length,
     };
 
-    self.storage.save(checkpoint).await.unwrap();
+    self
+      .storage
+      .save(checkpoint)
+      .await
+      .expect("Failed to save checkpoint");
   }
 
   fn reset_on_commit_promises(&mut self) {
@@ -129,7 +139,7 @@ impl<
       tokio::time::sleep(delay).await;
       self_sender
         .send(Message::NodeToSelf(NodeToSelfMessage::StartElection))
-        .unwrap()
+        .expect("Failed to send election message")
     })
   }
 
@@ -142,7 +152,7 @@ impl<
       tokio::time::sleep(delay).await;
       self_sender
         .send(Message::NodeToSelf(NodeToSelfMessage::Heartbeat))
-        .unwrap()
+        .expect("Failed to send heartbeat message");
     })
   }
 
@@ -167,12 +177,18 @@ impl<
   }
 
   async fn replicate_log(&self, follower: NodeId) {
-    let prefix_length = *self.state.sent_length.get(&follower).unwrap();
+    let prefix_length = *self
+      .state
+      .sent_length
+      .get(&follower)
+      .expect("Failed to find follower in sent_length map");
+
     let suffix = self.state.log[prefix_length..].to_vec();
+
     let prefix_term = if prefix_length > 0 {
       self.state.log[prefix_length - 1].term
     } else {
-      Term(0)
+      Term::zero()
     };
 
     self
@@ -229,7 +245,10 @@ impl<
     if let Some(promise) = self.on_commit_promises.remove(&index) {
       let _ = promise.send(Outcome::Success);
     }
-    self.message_delivery_sender.send(entry.data).unwrap();
+    self
+      .message_delivery_sender
+      .send(entry.data)
+      .expect("Failed to send delivered log entry to delivery queue");
   }
 
   async fn commit_log_entries(&mut self) {
@@ -275,8 +294,12 @@ impl<
           self.checkpoint().await;
         }
 
-        let last_term =
-          self.state.log.last().map(|m| m.term).unwrap_or(Term(0));
+        let last_term = self
+          .state
+          .log
+          .last()
+          .map(|m| m.term)
+          .unwrap_or(Term::zero());
 
         let log_ok = (candidate_last_log_term >= last_term)
           || (candidate_last_log_term == last_term
@@ -502,8 +525,12 @@ impl<
         self.state.current_role = NodeRole::Candidate;
         self.state.voted_for = Some(self.state.node_id);
         self.state.votes_received.insert(self.state.node_id);
-        let last_term =
-          self.state.log.last().map(|m| m.term).unwrap_or(Term(0));
+        let last_term = self
+          .state
+          .log
+          .last()
+          .map(|m| m.term)
+          .unwrap_or(Term::zero());
 
         self.checkpoint().await;
 
