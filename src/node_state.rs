@@ -68,7 +68,7 @@ impl<A: Clone + Eq> NodeState<A> {
   pub fn acks_for(&self, index: usize, nodes: &HashSet<NodeId>) -> usize {
     nodes
       .iter()
-      .filter(|node| *self.acked_length.get(node).unwrap() >= index)
+      .filter(|node| *self.acked_length.get(node).unwrap() > index)
       .count()
   }
 }

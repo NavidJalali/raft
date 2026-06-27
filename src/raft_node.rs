@@ -253,9 +253,11 @@ impl<
       }
     }
 
-    // Append the suffix
+    // Append only the entries past what we already have; the overlapping
+    // prefix of the suffix is already in the log.
     if prefix_length + suffix.len() > self.state.log.len() {
-      self.state.log.extend(suffix);
+      let already_have = self.state.log.len() - prefix_length;
+      self.state.log.extend(suffix.into_iter().skip(already_have));
     }
 
     // Update the commit length
@@ -367,7 +369,7 @@ impl<
         vote_granted,
       }) => {
         let is_candidate = self.state.current_role == NodeRole::Candidate;
-        let term_ok = self.state.current_term >= current_term;
+        let term_ok = self.state.current_term == current_term;
 
         if is_candidate && term_ok && vote_granted {
           self.state.votes_received.insert(node_id);
@@ -412,17 +414,11 @@ impl<
       }) => {
         self.accept_leader(node_id, current_term).await;
 
-        // We should check if that we have the prefix the leader assumed we do. I.e there are no gaps in the log.
-        let log_length_is_at_least_prefix_length =
-          self.state.log.len() >= prefix_length;
-
-        // Raft guarantees that if the prefix term is the same, the log is the same up to the prefix.
-        // Basically this is an efficient way to check if the logs are the same up to the prefix.
-        let prefix_term_ok = (prefix_length == 0)
-          || (prefix_length > 0
-            && self.state.log[prefix_length - 1].term == prefix_term);
-
-        let log_ok = log_length_is_at_least_prefix_length && prefix_term_ok;
+        // We should check if that we have the prefix the leader assumed we do.
+        // I.e there are no gaps in the log.
+        let log_ok = self.state.log.len() >= prefix_length
+          && (prefix_length == 0
+            || self.state.log[prefix_length - 1].term == prefix_term);
 
         if self.state.current_term == current_term && log_ok {
           let suffix_length = suffix.len();
@@ -534,6 +530,7 @@ impl<
         self.state.current_term = self.state.current_term.increment();
         self.state.current_role = NodeRole::Candidate;
         self.state.voted_for = Some(self.state.node_id);
+        self.state.votes_received.clear();
         self.state.votes_received.insert(self.state.node_id);
         self.reset_on_commit_promises();
         let last_term = self
@@ -708,6 +705,75 @@ mod tests {
       delivered.push(v);
     }
     assert_eq!(delivered, vec!["a".to_string(), "b".to_string()]);
+  }
+
+  #[tokio::test]
+  async fn does_not_commit_entry_acked_by_only_one_node() {
+    // Two entries from the current term. Only the leader (NodeId(1)) has the
+    // second entry; followers acked length 1. The off-by-one in acks_for would
+    // have counted the length-1 followers as covering index 1 and committed it
+    // prematurely.
+    let (delivery_tx, _delivery_rx) = unbounded_channel::<String>();
+    let mut node = leader_node(
+      vec![entry(2, "a"), entry(2, "b")],
+      Term(2),
+      vec![(NodeId(1), 2), (NodeId(2), 1), (NodeId(3), 1)],
+      delivery_tx,
+    );
+
+    node.commit_log_entries().await;
+
+    // Entry 0 is on a majority (all three have length >= 1) -> committed.
+    // Entry 1 is only on the leader -> must not commit.
+    assert_eq!(node.state.commit_length, 1);
+  }
+
+  #[tokio::test]
+  async fn append_entries_does_not_duplicate_overlapping_suffix() {
+    // Follower already has [a, b]. Leader resends from prefix_length 0 with the
+    // full suffix [a, b, c]. Only "c" should be appended, not a duplicate a/b.
+    let (delivery_tx, _delivery_rx) = unbounded_channel::<String>();
+    let mut node = leader_node(
+      vec![entry(1, "a"), entry(1, "b")],
+      Term(1),
+      vec![],
+      delivery_tx,
+    );
+
+    node
+      .append_entries(0, 0, vec![entry(1, "a"), entry(1, "b"), entry(1, "c")])
+      .await;
+
+    assert_eq!(
+      node.state.log,
+      vec![entry(1, "a"), entry(1, "b"), entry(1, "c")]
+    );
+  }
+
+  #[tokio::test]
+  async fn append_entries_request_with_prefix_past_log_does_not_panic() {
+    // A leader's sent_length can exceed a lagging follower's log length, so the
+    // follower receives prefix_length > log.len(). It must reject, not panic.
+    let (delivery_tx, _delivery_rx) = unbounded_channel::<String>();
+    let mut node =
+      leader_node(vec![entry(1, "a")], Term(1), vec![], delivery_tx);
+    node.state.current_role = NodeRole::Follower;
+
+    node
+      .process_message(Message::NodeToNode(
+        NodeToNodeMessage::AppendEntriesRequest {
+          node_id: NodeId(2),
+          current_term: Term(1),
+          prefix_length: 5,
+          prefix_term: Term(1),
+          leader_commit_length: 0,
+          suffix: vec![entry(1, "b")],
+        },
+      ))
+      .await;
+
+    // Rejected without appending or panicking.
+    assert_eq!(node.state.log, vec![entry(1, "a")]);
   }
 
   #[tokio::test]
