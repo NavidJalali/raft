@@ -59,4 +59,8 @@ impl<A: Clone + Eq> NodeState<A> {
       acked_length: HashMap::new(),
     }
   }
+
+  pub fn is_leader(&self) -> bool {
+    self.current_role == NodeRole::Leader
+  }
 }

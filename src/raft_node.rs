@@ -557,12 +557,16 @@ impl<
         self.reset_election_timer();
       }
       Message::NodeToSelf(NodeToSelfMessage::Heartbeat) => {
+        if !self.state.is_leader() {
+          return;
+        }
+
         for follower in self.cluster.nodes().await {
           if follower != self.state.node_id {
             self.replicate_log(follower).await;
           }
-          self.reset_heartbeat_timer()
         }
+        self.reset_heartbeat_timer();
       }
     }
   }
