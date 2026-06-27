@@ -288,6 +288,7 @@ impl<
         if candidate_current_term > self.state.current_term {
           self.state.current_term = candidate_current_term;
           self.state.current_role = NodeRole::Follower;
+          self.state.current_leader = None;
           self.state.voted_for = None;
           self.reset_on_commit_promises();
           self.reset_election_timer();
@@ -369,6 +370,7 @@ impl<
         } else if current_term > self.state.current_term {
           self.state.current_term = current_term;
           self.state.current_role = NodeRole::Follower;
+          self.state.current_leader = None;
           self.state.voted_for = None;
           self.reset_on_commit_promises();
           self.reset_election_timer();
@@ -458,6 +460,7 @@ impl<
         } else if current_term > self.state.current_term {
           self.state.current_term = current_term;
           self.state.current_role = NodeRole::Follower;
+          self.state.current_leader = None;
           self.state.voted_for = None;
           self.reset_on_commit_promises();
           self.reset_election_timer();
