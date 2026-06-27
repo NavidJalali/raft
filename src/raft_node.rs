@@ -525,6 +525,7 @@ impl<
         self.state.current_role = NodeRole::Candidate;
         self.state.voted_for = Some(self.state.node_id);
         self.state.votes_received.insert(self.state.node_id);
+        self.reset_on_commit_promises();
         let last_term = self
           .state
           .log
