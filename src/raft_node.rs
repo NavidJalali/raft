@@ -379,6 +379,16 @@ impl<
           if self.state.votes_received.len() >= quarum {
             self.state.current_role = NodeRole::Leader;
             self.state.current_leader = Some(self.state.node_id);
+
+            self
+              .state
+              .acked_length
+              .insert(self.state.node_id, self.state.log.len());
+            self
+              .state
+              .sent_length
+              .insert(self.state.node_id, self.state.log.len());
+
             self.reset_heartbeat_timer();
 
             info!(
@@ -705,6 +715,44 @@ mod tests {
       delivered.push(v);
     }
     assert_eq!(delivered, vec!["a".to_string(), "b".to_string()]);
+  }
+
+  #[tokio::test]
+  async fn newly_elected_leader_does_not_panic_on_first_ack() {
+    // A candidate with a non-empty log wins the election, then receives its
+    // first AppendEntriesResponse before any client write. commit_log_entries
+    // must not panic on the leader's own (previously unset) acked_length.
+    let (delivery_tx, _delivery_rx) = unbounded_channel::<String>();
+    let mut node =
+      leader_node(vec![entry(1, "a")], Term(1), vec![], delivery_tx);
+    node.state.current_role = NodeRole::Candidate;
+    node.state.votes_received = std::iter::once(NodeId(1)).collect();
+    node.state.acked_length.clear();
+    node.state.sent_length.clear();
+
+    // One peer grants its vote -> majority (2 of 3) -> becomes leader.
+    node
+      .process_message(Message::NodeToNode(NodeToNodeMessage::VoteResponse {
+        node_id: NodeId(2),
+        current_term: Term(1),
+        vote_granted: true,
+      }))
+      .await;
+    assert_eq!(node.state.current_role, NodeRole::Leader);
+
+    node
+      .process_message(Message::NodeToNode(
+        NodeToNodeMessage::AppendEntriesResponse {
+          node_id: NodeId(2),
+          current_term: Term(1),
+          acked_length: 1,
+          success: true,
+        },
+      ))
+      .await;
+
+    // Entry is on the leader and NodeId(2) -> majority -> committed.
+    assert_eq!(node.state.commit_length, 1);
   }
 
   #[tokio::test]
