@@ -63,4 +63,12 @@ impl<A: Clone + Eq> NodeState<A> {
   pub fn is_leader(&self) -> bool {
     self.current_role == NodeRole::Leader
   }
+
+  /// Number of `nodes` whose acked length covers the entry at `index`.
+  pub fn acks_for(&self, index: usize, nodes: &HashSet<NodeId>) -> usize {
+    nodes
+      .iter()
+      .filter(|node| *self.acked_length.get(node).unwrap() >= index)
+      .count()
+  }
 }

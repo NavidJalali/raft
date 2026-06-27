@@ -284,28 +284,17 @@ impl<
     let nodes = self.cluster.nodes().await;
     let majority = self.cluster.majority().await;
 
-    // A leader may only directly commit entries from its own current term
-    // (Raft §5.4.2, Figure 8). An entry from an earlier term, even when
-    // replicated on a majority, can still be overwritten by a future leader,
-    // so we never advance the commit length to it on replication count alone.
-    // Such entries become committed transitively once a current-term entry
-    // past them is committed. We therefore find the highest majority-acked
-    // index that belongs to the current term and commit up to and including it.
     let mut commitable = self.state.commit_length;
     let mut index = self.state.commit_length;
     while index < self.state.log.len() {
-      let acks = nodes.iter().fold(0, |acc, node| {
-        if *self.state.acked_length.get(node).unwrap() >= index {
-          acc + 1
-        } else {
-          acc
-        }
-      });
-
-      if acks < majority {
+      if self.state.acks_for(index, &nodes) < majority {
         break;
       }
 
+      // Only advance the commit point on a current-term entry:
+      // a prior-term entry on a majority can still be overwritten,
+      // so it is never committed on its own. When we do commit here, every
+      // entry before this index is committed along with it.
       if self.state.log[index].term == self.state.current_term {
         commitable = index + 1;
       }
