@@ -281,24 +281,43 @@ impl<
   }
 
   async fn commit_log_entries(&mut self) {
-    while self.state.commit_length < self.state.log.len() {
-      let acks = self.cluster.nodes().await.iter().fold(0, |acc, node| {
-        if *self.state.acked_length.get(node).unwrap()
-          >= self.state.commit_length
-        {
+    let nodes = self.cluster.nodes().await;
+    let majority = self.cluster.majority().await;
+
+    // A leader may only directly commit entries from its own current term
+    // (Raft §5.4.2, Figure 8). An entry from an earlier term, even when
+    // replicated on a majority, can still be overwritten by a future leader,
+    // so we never advance the commit length to it on replication count alone.
+    // Such entries become committed transitively once a current-term entry
+    // past them is committed. We therefore find the highest majority-acked
+    // index that belongs to the current term and commit up to and including it.
+    let mut commitable = self.state.commit_length;
+    let mut index = self.state.commit_length;
+    while index < self.state.log.len() {
+      let acks = nodes.iter().fold(0, |acc, node| {
+        if *self.state.acked_length.get(node).unwrap() >= index {
           acc + 1
         } else {
           acc
         }
       });
 
-      if acks >= self.cluster.majority().await {
-        self.deliver_log_entry(self.state.commit_length);
-        self.state.commit_length += 1;
-      } else {
+      if acks < majority {
         break;
       }
+
+      if self.state.log[index].term == self.state.current_term {
+        commitable = index + 1;
+      }
+
+      index += 1;
     }
+
+    while self.state.commit_length < commitable {
+      self.deliver_log_entry(self.state.commit_length);
+      self.state.commit_length += 1;
+    }
+
     self.checkpoint().await;
   }
 
@@ -577,8 +596,10 @@ mod tests {
   use super::*;
   use crate::{
     cluster::stub::StubCluster, persistence::in_memory::InMemoryPersistence,
-    time_window::TimeWindow,
+    remote_node_ref::RemoteNodeRef, time_window::TimeWindow,
   };
+  use async_trait::async_trait;
+  use std::collections::HashSet;
   use std::time::Duration;
 
   fn entry(term: u64, data: &str) -> LogEntry<String> {
@@ -586,6 +607,118 @@ mod tests {
       data: data.to_string(),
       term: Term(term),
     }
+  }
+
+  /// Fixed-membership cluster that drops all sends. Lets commit logic be
+  /// exercised against a controllable set of nodes and majority.
+  struct TestCluster {
+    nodes: HashSet<NodeId>,
+    majority: usize,
+  }
+
+  #[async_trait]
+  impl Cluster<String> for TestCluster {
+    async fn send_message(&self, _: NodeId, _: NodeToNodeMessage<String>) {}
+    async fn nodes(&self) -> HashSet<NodeId> {
+      self.nodes.clone()
+    }
+    async fn majority(&self) -> usize {
+      self.majority
+    }
+    async fn node_ref(&self, _: NodeId) -> Option<RemoteNodeRef> {
+      None
+    }
+  }
+
+  fn long_timers_config() -> Config {
+    Config {
+      election_time_window: TimeWindow::new(
+        Duration::from_secs(60),
+        Duration::from_secs(60),
+      ),
+      heartbeat_time_window: TimeWindow::new(
+        Duration::from_secs(60),
+        Duration::from_secs(60),
+      ),
+    }
+  }
+
+  /// Build a leader (NodeId(1)) over a three-node cluster with the given log,
+  /// current term, and per-node acked lengths, ready to call commit logic.
+  fn leader_node(
+    log: Vec<LogEntry<String>>,
+    current_term: Term,
+    acked: Vec<(NodeId, usize)>,
+    delivery_tx: UnboundedSender<String>,
+  ) -> RaftNode<String, TestCluster, InMemoryPersistence<String>> {
+    let (self_ref, mailbox) = unbounded_channel();
+    let cluster = TestCluster {
+      nodes: vec![NodeId(1), NodeId(2), NodeId(3)].into_iter().collect(),
+      majority: 2,
+    };
+    let checkpoint = Checkpoint {
+      node_id: NodeId(1),
+      current_term,
+      voted_for: None,
+      log: log.clone(),
+      commit_length: 0,
+    };
+    let mut state = NodeState::recover(NodeId(1), current_term, None, log, 0);
+    state.current_role = NodeRole::Leader;
+    state.acked_length = acked.into_iter().collect();
+
+    RaftNode {
+      config: long_timers_config(),
+      state,
+      cluster,
+      storage: InMemoryPersistence::with(checkpoint),
+      mailbox,
+      self_ref,
+      timer: tokio::spawn(async {}),
+      on_commit_promises: HashMap::new(),
+      message_delivery_sender: delivery_tx,
+    }
+  }
+
+  #[tokio::test]
+  async fn does_not_commit_previous_term_entry_on_majority_alone() {
+    // Figure 8: a leader in term 2 holds an entry from term 1 that is replicated
+    // on a majority. It must NOT be committed on replication count alone — a
+    // future leader could still overwrite it.
+    let (delivery_tx, _delivery_rx) = unbounded_channel::<String>();
+    let mut node = leader_node(
+      vec![entry(1, "a")],
+      Term(2),
+      vec![(NodeId(1), 1), (NodeId(2), 1), (NodeId(3), 0)],
+      delivery_tx,
+    );
+
+    node.commit_log_entries().await;
+
+    assert_eq!(node.state.commit_length, 0);
+  }
+
+  #[tokio::test]
+  async fn commits_previous_term_entry_transitively() {
+    // Once a current-term entry past it reaches a majority, the earlier-term
+    // entry is committed transitively along with it.
+    let (delivery_tx, mut delivery_rx) = unbounded_channel::<String>();
+    let mut node = leader_node(
+      vec![entry(1, "a"), entry(2, "b")],
+      Term(2),
+      vec![(NodeId(1), 2), (NodeId(2), 2), (NodeId(3), 0)],
+      delivery_tx,
+    );
+
+    node.commit_log_entries().await;
+
+    assert_eq!(node.state.commit_length, 2);
+
+    let mut delivered = Vec::new();
+    while let Ok(v) = delivery_rx.try_recv() {
+      delivered.push(v);
+    }
+    assert_eq!(delivered, vec!["a".to_string(), "b".to_string()]);
   }
 
   #[tokio::test]
