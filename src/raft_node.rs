@@ -130,6 +130,35 @@ impl<
     self.on_commit_promises.clear();
   }
 
+  /// Revert to follower on observing a higher term. No leader is known for the
+  /// new term yet, so `current_leader` is cleared.
+  async fn step_down_to_follower(&mut self, new_term: Term) {
+    self.state.current_term = new_term;
+    self.state.current_role = NodeRole::Follower;
+    self.state.current_leader = None;
+    self.state.voted_for = None;
+    self.reset_on_commit_promises();
+    self.reset_election_timer();
+    self.checkpoint().await;
+  }
+
+  /// Recognize `leader` as the leader for `term`, adopting the term if it is
+  /// newer than ours. A stale `term` (older than ours) is ignored. Clears the
+  /// vote if the term advances.
+  async fn accept_leader(&mut self, leader: NodeId, term: Term) {
+    if term > self.state.current_term {
+      self.state.current_term = term;
+      self.state.voted_for = None;
+    }
+    if self.state.current_term == term {
+      self.state.current_role = NodeRole::Follower;
+      self.state.current_leader = Some(leader);
+      self.reset_on_commit_promises();
+      self.reset_election_timer();
+      self.checkpoint().await;
+    }
+  }
+
   fn election_timer(
     config: &Config,
     self_sender: UnboundedSender<Message<A>>,
@@ -286,13 +315,7 @@ impl<
         }
 
         if candidate_current_term > self.state.current_term {
-          self.state.current_term = candidate_current_term;
-          self.state.current_role = NodeRole::Follower;
-          self.state.current_leader = None;
-          self.state.voted_for = None;
-          self.reset_on_commit_promises();
-          self.reset_election_timer();
-          self.checkpoint().await;
+          self.step_down_to_follower(candidate_current_term).await;
         }
 
         let last_term = self
@@ -368,13 +391,7 @@ impl<
             }
           }
         } else if current_term > self.state.current_term {
-          self.state.current_term = current_term;
-          self.state.current_role = NodeRole::Follower;
-          self.state.current_leader = None;
-          self.state.voted_for = None;
-          self.reset_on_commit_promises();
-          self.reset_election_timer();
-          self.checkpoint().await;
+          self.step_down_to_follower(current_term).await;
         }
       }
       Message::NodeToNode(NodeToNodeMessage::AppendEntriesRequest {
@@ -385,19 +402,7 @@ impl<
         leader_commit_length,
         suffix,
       }) => {
-        if current_term > self.state.current_term {
-          self.state.current_term = current_term;
-          self.state.voted_for = None;
-          // Will always fall through to the bottom if condition
-        }
-
-        if self.state.current_term == current_term {
-          self.state.current_role = NodeRole::Follower;
-          self.state.current_leader = Some(node_id);
-          self.reset_on_commit_promises();
-          self.reset_election_timer();
-          self.checkpoint().await;
-        }
+        self.accept_leader(node_id, current_term).await;
 
         // We should check if that we have the prefix the leader assumed we do. I.e there are no gaps in the log.
         let log_length_is_at_least_prefix_length =
@@ -458,13 +463,7 @@ impl<
             );
           }
         } else if current_term > self.state.current_term {
-          self.state.current_term = current_term;
-          self.state.current_role = NodeRole::Follower;
-          self.state.current_leader = None;
-          self.state.voted_for = None;
-          self.reset_on_commit_promises();
-          self.reset_election_timer();
-          self.checkpoint().await;
+          self.step_down_to_follower(current_term).await;
         }
       }
       // Client
