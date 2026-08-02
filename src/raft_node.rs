@@ -7,7 +7,7 @@ use tokio::{
   },
   task::JoinHandle,
 };
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::{
   cluster::Cluster,
@@ -120,6 +120,13 @@ impl<
       .expect("Failed to save checkpoint");
   }
 
+  /// Peer messages arrive over an unauthenticated endpoint, so every sender
+  /// has to be checked against the configured membership before it is allowed
+  /// to touch our state.
+  async fn is_member(&self, node_id: NodeId) -> bool {
+    self.cluster.nodes().await.contains(&node_id)
+  }
+
   fn reset_on_commit_promises(&mut self) {
     // Cancel all the promises.
     for (_, promise) in self.on_commit_promises.drain() {
@@ -206,11 +213,13 @@ impl<
   }
 
   async fn replicate_log(&self, follower: NodeId) {
-    let prefix_length = *self
+    let prefix_length = self
       .state
       .sent_length
       .get(&follower)
-      .expect("Failed to find follower in sent_length map");
+      .copied()
+      .unwrap_or(0)
+      .min(self.state.log.len());
 
     let suffix = self.state.log[prefix_length..].to_vec();
 
@@ -256,16 +265,18 @@ impl<
     // Append only the entries past what we already have; the overlapping
     // prefix of the suffix is already in the log.
     if prefix_length + suffix.len() > self.state.log.len() {
-      let already_have = self.state.log.len() - prefix_length;
+      let already_have = self.state.log.len().saturating_sub(prefix_length);
       self.state.log.extend(suffix.into_iter().skip(already_have));
     }
 
-    // Update the commit length
-    if leader_commit_length > self.state.commit_length {
-      for i in self.state.commit_length..leader_commit_length {
+    // Update the commit length. The leader may be ahead of the entries it has
+    // actually shipped us, so commit no further than our own log.
+    let commitable = leader_commit_length.min(self.state.log.len());
+    if commitable > self.state.commit_length {
+      for i in self.state.commit_length..commitable {
         self.deliver_log_entry(i);
       }
-      self.state.commit_length = leader_commit_length;
+      self.state.commit_length = commitable;
     }
     self.checkpoint().await;
   }
@@ -324,6 +335,14 @@ impl<
           return;
         }
 
+        if !self.is_member(candidate_node_id).await {
+          warn!(
+            "Ignoring VoteRequest from non-member {:?}",
+            candidate_node_id
+          );
+          return;
+        }
+
         if candidate_current_term > self.state.current_term {
           self.step_down_to_follower(candidate_current_term).await;
         }
@@ -335,7 +354,7 @@ impl<
           .map(|m| m.term)
           .unwrap_or(Term::zero());
 
-        let log_ok = (candidate_last_log_term >= last_term)
+        let log_ok = candidate_last_log_term > last_term
           || (candidate_last_log_term == last_term
             && candidate_log_length >= self.state.log.len());
 
@@ -368,6 +387,11 @@ impl<
         current_term,
         vote_granted,
       }) => {
+        if !self.is_member(node_id).await {
+          warn!("Ignoring VoteResponse from non-member {:?}", node_id);
+          return;
+        }
+
         let is_candidate = self.state.current_role == NodeRole::Candidate;
         let term_ok = self.state.current_term == current_term;
 
@@ -422,6 +446,14 @@ impl<
         leader_commit_length,
         suffix,
       }) => {
+        if !self.is_member(node_id).await {
+          warn!(
+            "Ignoring AppendEntriesRequest from non-member {:?}",
+            node_id
+          );
+          return;
+        }
+
         self.accept_leader(node_id, current_term).await;
 
         // We should check if that we have the prefix the leader assumed we do.
@@ -460,21 +492,29 @@ impl<
         acked_length,
         success,
       }) => {
+        if !self.is_member(node_id).await {
+          warn!(
+            "Ignoring AppendEntriesResponse from non-member {:?}",
+            node_id
+          );
+          return;
+        }
+
         let is_leader = self.state.current_role == NodeRole::Leader;
         if self.state.current_term == current_term && is_leader {
-          if success
-            && acked_length >= *self.state.acked_length.get(&node_id).unwrap()
-          {
+          let acked_so_far =
+            self.state.acked_length.get(&node_id).copied().unwrap_or(0);
+          let sent_so_far =
+            self.state.sent_length.get(&node_id).copied().unwrap_or(0);
+
+          if success && acked_length >= acked_so_far {
             self.state.sent_length.insert(node_id, acked_length);
             self.state.acked_length.insert(node_id, acked_length);
             self.commit_log_entries().await;
-          } else if *self.state.sent_length.get(&node_id).unwrap() > 0 {
+          } else if sent_so_far > 0 {
             // If the follower rejected the entries, we should decrement the sent length.
             // This is inefficient, but it is the simplest way to handle this.
-            self.state.sent_length.insert(
-              node_id,
-              *self.state.sent_length.get(&node_id).unwrap() - 1,
-            );
+            self.state.sent_length.insert(node_id, sent_so_far - 1);
           }
         } else if current_term > self.state.current_term {
           self.step_down_to_follower(current_term).await;
@@ -822,6 +862,107 @@ mod tests {
 
     // Rejected without appending or panicking.
     assert_eq!(node.state.log, vec![entry(1, "a")]);
+  }
+
+  #[tokio::test]
+  async fn does_not_vote_for_candidate_with_shorter_log() {
+    // Candidate's last log term matches ours but its log is shorter, so it is
+    // missing entries we hold. Granting the vote would let it truncate them.
+    let (delivery_tx, _delivery_rx) = unbounded_channel::<String>();
+    let mut node = leader_node(
+      vec![entry(1, "a"), entry(1, "b")],
+      Term(5),
+      vec![],
+      delivery_tx,
+    );
+    node.state.current_role = NodeRole::Follower;
+
+    node
+      .process_message(Message::NodeToNode(NodeToNodeMessage::VoteRequest {
+        candidate_node_id: NodeId(2),
+        candidate_current_term: Term(5),
+        candidate_log_length: 1,
+        candidate_last_log_term: Term(1),
+      }))
+      .await;
+
+    assert_eq!(node.state.voted_for, None);
+  }
+
+  #[tokio::test]
+  async fn append_entries_response_from_unknown_node_is_ignored() {
+    // The /raft endpoint is unauthenticated, so a response can carry any
+    // node_id. It must not be indexed into the per-peer maps.
+    let (delivery_tx, _delivery_rx) = unbounded_channel::<String>();
+    let mut node = leader_node(
+      vec![entry(1, "a")],
+      Term(1),
+      vec![(NodeId(1), 1)],
+      delivery_tx,
+    );
+
+    node
+      .process_message(Message::NodeToNode(
+        NodeToNodeMessage::AppendEntriesResponse {
+          node_id: NodeId(999),
+          current_term: Term(1),
+          acked_length: 1,
+          success: true,
+        },
+      ))
+      .await;
+
+    assert!(!node.state.acked_length.contains_key(&NodeId(999)));
+    assert!(!node.state.sent_length.contains_key(&NodeId(999)));
+    assert_eq!(node.state.commit_length, 0);
+  }
+
+  #[tokio::test]
+  async fn leader_commit_length_past_our_log_is_clamped() {
+    // The leader's commit length can be ahead of the entries it has actually
+    // shipped us. We must not try to deliver entries we do not have.
+    let (delivery_tx, _delivery_rx) = unbounded_channel::<String>();
+    let mut node = leader_node(vec![], Term(1), vec![], delivery_tx);
+    node.state.current_role = NodeRole::Follower;
+
+    node
+      .process_message(Message::NodeToNode(
+        NodeToNodeMessage::AppendEntriesRequest {
+          node_id: NodeId(2),
+          current_term: Term(1),
+          prefix_length: 0,
+          prefix_term: Term::zero(),
+          leader_commit_length: 3,
+          suffix: vec![],
+        },
+      ))
+      .await;
+
+    assert_eq!(node.state.commit_length, 0);
+  }
+
+  #[tokio::test]
+  async fn forged_vote_responses_do_not_elect_a_leader() {
+    // Two responses from node ids outside the cluster must not count towards
+    // the quorum, otherwise any candidate can declare itself leader.
+    let (delivery_tx, _delivery_rx) = unbounded_channel::<String>();
+    let mut node =
+      leader_node(vec![entry(1, "a")], Term(1), vec![], delivery_tx);
+    node.state.current_role = NodeRole::Candidate;
+    node.state.votes_received = std::iter::once(NodeId(1)).collect();
+
+    for forged in [NodeId(998), NodeId(999)] {
+      node
+        .process_message(Message::NodeToNode(NodeToNodeMessage::VoteResponse {
+          node_id: forged,
+          current_term: Term(1),
+          vote_granted: true,
+        }))
+        .await;
+    }
+
+    assert_eq!(node.state.current_role, NodeRole::Candidate);
+    assert_eq!(node.state.votes_received.len(), 1);
   }
 
   #[tokio::test]
