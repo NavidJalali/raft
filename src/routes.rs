@@ -17,9 +17,9 @@ use tracing::info;
 pub fn make_router<S: AppState<KeyValueCommand>>(state: S) -> Router {
   Router::new()
     .route("/raft", post(raft_handler::<S>))
-    .route("/store/:key", get(get_handler::<S>))
-    .route("/store/:key", post(post_handler::<S>))
-    .route("/store/:key", delete(delete_handler::<S>))
+    .route("/store/{key}", get(get_handler::<S>))
+    .route("/store/{key}", post(post_handler::<S>))
+    .route("/store/{key}", delete(delete_handler::<S>))
     .with_state(state)
     .layer(TraceLayer::new_for_http())
 }
